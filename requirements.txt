@@ -1,0 +1,9 @@
+pyrofork
+tgcrypto
+pillow
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+redis
+python-dotenv
