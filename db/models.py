@@ -20,7 +20,14 @@ class User(Base):
     losses = Column(Integer, default=0)
 
     daily_claim_at = Column(DateTime)
+
+    # ───── Anti-cheat / moderation ─────
+    cheat_strikes = Column(Integer, default=0)
+    last_cheat_reason = Column(Text, nullable=True)
+    last_cheat_at = Column(DateTime, nullable=True)
+
     is_banned = Column(Boolean, default=False)
+    ban_until = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -39,7 +46,10 @@ class Match(Base):
     total_pot = Column(BigInteger)
     bonus = Column(BigInteger)
 
-    started_at = Column(DateTime(timezone=True))
+    started_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now()
+    )
     ended_at = Column(DateTime(timezone=True))
 
 # ───────────────────────── TRANSACTIONS ─────────────────────────
@@ -54,7 +64,7 @@ class Transaction(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-# ───────────────────────── PENALTIES ─────────────────────────
+# ───────────────────────── PENALTIES (OPTIONAL / AUDIT) ─────────────────────────
 
 class Penalty(Base):
     __tablename__ = "penalties"
@@ -67,4 +77,3 @@ class Penalty(Base):
     banned_until = Column(DateTime)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-  
