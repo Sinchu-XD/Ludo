@@ -1,16 +1,13 @@
 # admin/routes/games.py
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Dict, Any
 
 from admin.auth import get_current_admin, require_owner
 from db.database import SessionLocal
 from db.wallet import add_coins
 from db.models import Match
 
-# ⚠️ IMPORTANT:
-# Ye ROOMS import bot se aayega
-# Production me Redis use hoga
-from bot import ROOMS
+# ✅ SAFE shared room store (bot + admin)
+from services.room_store import ROOMS
 
 router = APIRouter()
 
@@ -52,7 +49,6 @@ def force_end_game(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
 
-    # Refund if needed
     if refund:
         db = SessionLocal()
         for p in room.players:
@@ -64,7 +60,6 @@ def force_end_game(
             )
         db.close()
 
-    # Mark finished
     room.finished = True
     ROOMS.pop(room_id, None)
 
@@ -103,4 +98,3 @@ def match_history(limit: int = 20, admin=Depends(get_current_admin)):
         }
         for m in matches
     ]
-  
