@@ -1,7 +1,8 @@
 # admin/app.py
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from admin.auth import authenticate_admin, create_access_token
 from admin.routes import users, games, stats
 
 app = FastAPI(
@@ -19,6 +20,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ───────── LOGIN ENDPOINT (VERY IMPORTANT) ─────────
+@app.post("/login")
+def login(data: dict):
+    """
+    Admin login:
+    {
+      "username": "admin",
+      "password": "admin123"
+    }
+    """
+    admin = authenticate_admin(
+        data.get("username"),
+        data.get("password")
+    )
+
+    if not admin:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_access_token({
+        "username": admin["username"],
+        "role": admin["role"]
+    })
+
+    return {
+        "access_token": token,
+        "token_type": "bearer"
+    }
+
 # ───────── ROUTES ─────────
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(games.router, prefix="/games", tags=["Games"])
@@ -32,4 +61,3 @@ def root():
         "service": "Ludo Admin Panel",
         "version": "1.0.0"
     }
-  
