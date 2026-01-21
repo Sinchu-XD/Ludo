@@ -1,33 +1,63 @@
 # engine/timer.py
 import asyncio
-import time
+from typing import Callable, Dict
 
 TURN_TIMEOUT = 30  # seconds
 
-class TurnTimer:
-    def __init__(self):
-        self._tasks = {}
 
-    async def start(self, room_id, on_timeout):
+class TurnTimer:
+    """
+    One active timer per room.
+    Safely cancels & restarts timers.
+    """
+
+    def __init__(self):
+        self._tasks: Dict[str, asyncio.Task] = {}
+
+    async def start(
+        self,
+        room_id: str,
+        player_id: int,
+        on_timeout: Callable[[str, int], None],
+    ):
         """
-        Start turn timer for a room.
-        on_timeout = async callback(room_id)
+        Start a turn timer for a room.
+
+        on_timeout(room_id, player_id)
         """
-        self.cancel(room_id)
+        await self.cancel(room_id)
 
         async def _job():
-            await asyncio.sleep(TURN_TIMEOUT)
-            await on_timeout(room_id)
+            try:
+                await asyncio.sleep(TURN_TIMEOUT)
+                await on_timeout(room_id, player_id)
+            except asyncio.CancelledError:
+                # Timer cancelled safely
+                pass
 
         task = asyncio.create_task(_job())
         self._tasks[room_id] = task
 
-    def cancel(self, room_id):
+    async def cancel(self, room_id: str):
+        """
+        Cancel running timer for room
+        """
         task = self._tasks.pop(room_id, None)
         if task and not task.done():
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
-    def reset(self, room_id, on_timeout):
-        self.cancel(room_id)
-        return self.start(room_id, on_timeout)
-      
+    async def reset(
+        self,
+        room_id: str,
+        player_id: int,
+        on_timeout: Callable[[str, int], None],
+    ):
+        """
+        Reset timer safely
+        """
+        await self.cancel(room_id)
+        await self.start(room_id, player_id, on_timeout)
