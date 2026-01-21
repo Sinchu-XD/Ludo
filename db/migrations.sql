@@ -2,18 +2,25 @@
 -- USERS
 -- ================================
 CREATE TABLE IF NOT EXISTS users (
-    user_id        BIGINT PRIMARY KEY,
-    username       VARCHAR(64),
-    coins          BIGINT DEFAULT 0,
+    user_id            BIGINT PRIMARY KEY,
+    username           VARCHAR(64),
+    coins              BIGINT DEFAULT 0,
 
-    total_games    INT DEFAULT 0,
-    wins           INT DEFAULT 0,
-    losses         INT DEFAULT 0,
+    total_games        INT DEFAULT 0,
+    wins               INT DEFAULT 0,
+    losses             INT DEFAULT 0,
 
-    daily_claim_at TIMESTAMP,
-    is_banned      BOOLEAN DEFAULT FALSE,
+    daily_claim_at     TIMESTAMP,
 
-    created_at     TIMESTAMPTZ DEFAULT NOW()
+    -- Anti-cheat / moderation
+    cheat_strikes      INT DEFAULT 0,
+    last_cheat_reason  TEXT,
+    last_cheat_at      TIMESTAMP,
+    ban_until          TIMESTAMPTZ,
+
+    is_banned          BOOLEAN DEFAULT FALSE,
+
+    created_at         TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
@@ -32,7 +39,7 @@ CREATE TABLE IF NOT EXISTS matches (
     total_pot    BIGINT,
     bonus        BIGINT,
 
-    started_at   TIMESTAMPTZ,
+    started_at   TIMESTAMPTZ DEFAULT NOW(),
     ended_at     TIMESTAMPTZ
 );
 
@@ -53,7 +60,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
 
 -- ================================
--- PENALTIES
+-- PENALTIES (AUDIT LOG)
 -- ================================
 CREATE TABLE IF NOT EXISTS penalties (
     id              SERIAL PRIMARY KEY,
