@@ -9,6 +9,7 @@ from engine.engine import LudoEngine
 from engine.room import GameRoom
 from engine.models import Player
 from engine.ai import LudoAI
+from engine.timer import TurnTimer
 
 # ───────── Renderer ─────────
 from renderer.board import BoardRenderer
@@ -26,11 +27,13 @@ from services.room_store import ROOMS
 from services.match_service import MatchService
 from services.anti_cheat import AntiCheatService
 
+# ───────── INIT ─────────
 app = Client("ludo_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 engine = LudoEngine()
 ai = LudoAI()
 renderer = BoardRenderer()
+timer = TurnTimer()
 match_service = MatchService(engine)
 
 # ───────────────── UI ─────────────────
@@ -68,16 +71,26 @@ async def start(_, msg):
             return
         user.username = msg.from_user.username
     else:
-        user = User(
-            user_id=msg.from_user.id,
-            username=msg.from_user.username
-        )
+        user = User(user_id=msg.from_user.id, username=msg.from_user.username)
         db.add(user)
 
     db.commit()
     db.close()
-
     await msg.reply("🎲 Welcome to Ludo Bot", reply_markup=main_menu())
+
+# ───────────────── AFK HANDLER ─────────────────
+
+async def on_turn_timeout(room_id, user_id):
+    room = ROOMS.get(room_id)
+    if not room or room.finished:
+        return
+
+    db = SessionLocal()
+    AntiCheatService.handle_afk(db, room_id, user_id)
+    db.close()
+
+    room.state.next_turn()
+    await next_turn(room)
 
 # ───────────────── CALLBACKS ─────────────────
 
@@ -110,7 +123,7 @@ async def cb(_, cq):
 
         if room.is_full():
             match_service.start_match(room)
-            await next_turn(room, cq.message)
+            await next_turn(room)
 
     # DAILY
     elif data == "daily":
@@ -137,12 +150,16 @@ async def cb(_, cq):
         room = ROOMS.get(data.split(":")[1])
         if not room:
             return
+
         state = room.state
         player = state.players[state.current_turn]
         if player.user_id != uid:
             return
+
         dice = engine.roll_dice()
         state.dice_value = dice
+
+        await timer.reset(room.room_id, uid, on_turn_timeout)
         await cq.message.reply(f"🎲 Dice: {dice}", reply_markup=move_kb(room.room_id))
 
     # MOVE
@@ -162,24 +179,39 @@ async def cb(_, cq):
 
         await cq.message.reply_photo(img, caption=f"♟ {res['result']}")
 
-        # CHECK FINISH
-        if room.finished:
+        # Dice rules
+        dice_rules = engine.handle_dice_rules(state, state.dice_value)
+
+        # Match finish
+        if res["player_finished"]:
+            room.end_game()
+            await timer.cancel(room.room_id)
             db = SessionLocal()
             match_service.finalize_match(db, room)
             db.close()
             await cq.message.reply("🏁 Match Finished!")
             return
 
-        if not res["bonus"]:
-            state.next_turn()
-
-        await next_turn(room, cq.message)
+        if not dice_rules["extra_turn"]:
+            await next_turn(room)
+        else:
+            await next_turn(room, same_player=True)
 
 # ───────────────── TURN ─────────────────
 
-async def next_turn(room, msg):
-    p = room.state.players[room.state.current_turn]
-    await msg.reply(f"🎯 Turn: {p.user_id}", reply_markup=roll_kb(room.room_id))
+async def next_turn(room, same_player=False):
+    state = room.state
+    if not same_player:
+        state.next_turn()
+
+    p = state.players[state.current_turn]
+    await timer.start(room.room_id, p.user_id, on_turn_timeout)
+
+    await app.send_message(
+        p.user_id,
+        f"🎯 Your turn!",
+        reply_markup=roll_kb(room.room_id)
+    )
 
 # ───────────────── RUN ─────────────────
 app.run()
