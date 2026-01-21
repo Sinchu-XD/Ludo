@@ -9,18 +9,26 @@ from pyrogram.types import (
 )
 
 from config import API_ID, API_HASH, BOT_TOKEN
+
+# ───────── Engine ─────────
 from engine.engine import LudoEngine
 from engine.room import GameRoom
 from engine.models import Player
 from engine.timer import TurnTimer
 from engine.ai import LudoAI
 
+# ───────── Renderer ─────────
+from renderer.board import BoardRenderer
+
+# ───────── Database & Features ─────────
 from db.database import SessionLocal
-from db.wallet import get_balance, deduct_coins
+from db.wallet import deduct_coins
 from features.daily import claim_daily, DailyBonusError
 from features.leaderboard import get_leaderboard
 
-# ───────────────────────── INIT ─────────────────────────
+# ───────────────────────────────────────
+# INIT
+# ───────────────────────────────────────
 
 app = Client(
     "ludo_bot",
@@ -32,11 +40,14 @@ app = Client(
 engine = LudoEngine()
 timer = TurnTimer()
 ai = LudoAI()
+renderer = BoardRenderer()
 
-# In-memory active rooms (Redis later)
+# ⚠️ Active rooms (later Redis)
 ROOMS = {}
 
-# ───────────────────────── HELPERS ─────────────────────────
+# ───────────────────────────────────────
+# UI HELPERS
+# ───────────────────────────────────────
 
 def main_menu():
     return InlineKeyboardMarkup([
@@ -45,23 +56,38 @@ def main_menu():
         [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
     ])
 
-# ───────────────────────── COMMANDS ─────────────────────────
+def roll_keyboard(room_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 Roll Dice", callback_data=f"roll:{room_id}")]
+    ])
+
+def move_keyboard(room_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"Move {i+1}", callback_data=f"move:{room_id}:{i}")
+        for i in range(4)
+    ]])
+
+# ───────────────────────────────────────
+# COMMANDS
+# ───────────────────────────────────────
 
 @app.on_message(filters.command("start"))
-async def start(_: Client, msg: Message):
+async def start(_, msg: Message):
     await msg.reply(
         "🎲 **Welcome to Ludo Bot**\n\nChoose an option:",
         reply_markup=main_menu()
     )
 
-# ───────────────────────── CALLBACKS ─────────────────────────
+# ───────────────────────────────────────
+# CALLBACK HANDLER
+# ───────────────────────────────────────
 
 @app.on_callback_query()
-async def callbacks(_: Client, cq: CallbackQuery):
+async def callbacks(_, cq: CallbackQuery):
     data = cq.data
     user = cq.from_user
 
-    # ───────── Create Room ─────────
+    # ───────── CREATE ROOM ─────────
     if data == "create_room":
         room = GameRoom(
             owner_id=user.id,
@@ -73,20 +99,18 @@ async def callbacks(_: Client, cq: CallbackQuery):
         ROOMS[room.room_id] = room
 
         await cq.message.reply(
-            f"🏠 Room Created\n"
+            f"🏠 **Room Created**\n"
             f"Room ID: `{room.room_id}`\n"
             f"Entry Fee: 50 coins",
             reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "➕ Join Room",
-                        callback_data=f"join:{room.room_id}"
-                    )
-                ]
+                [InlineKeyboardButton(
+                    "➕ Join Room",
+                    callback_data=f"join:{room.room_id}"
+                )]
             ])
         )
 
-    # ───────── Join Room ─────────
+    # ───────── JOIN ROOM ─────────
     elif data.startswith("join:"):
         room_id = data.split(":")[1]
         room = ROOMS.get(room_id)
@@ -104,23 +128,23 @@ async def callbacks(_: Client, cq: CallbackQuery):
             return
         db.close()
 
-        color = ["green", "yellow", "blue"][len(room.players) - 1]
+        colors = ["green", "yellow", "blue"]
+        color = colors[len(room.players) - 1]
         room.add_player(Player(user.id, color))
 
-        await cq.message.reply(f"👤 {user.first_name} joined the room")
+        await cq.message.reply(f"👤 **{user.first_name} joined the room**")
 
         if room.is_full():
             room.start_game()
-            await cq.message.reply("🎮 Game Started!")
-
+            await cq.message.reply("🎮 **Game Started!**")
             await start_turn(room, cq.message)
 
-    # ───────── Daily Bonus ─────────
+    # ───────── DAILY BONUS ─────────
     elif data == "daily":
         db = SessionLocal()
         try:
             bonus = claim_daily(db, user.id)
-            text = f"🎁 You received {bonus} coins!"
+            text = f"🎁 You received **{bonus} coins**!"
         except DailyBonusError as e:
             text = str(e)
         finally:
@@ -128,7 +152,7 @@ async def callbacks(_: Client, cq: CallbackQuery):
 
         await cq.answer(text, show_alert=True)
 
-    # ───────── Leaderboard ─────────
+    # ───────── LEADERBOARD ─────────
     elif data == "leaderboard":
         db = SessionLocal()
         top = get_leaderboard(db)
@@ -141,7 +165,7 @@ async def callbacks(_: Client, cq: CallbackQuery):
 
         await cq.message.reply(text)
 
-    # ───────── Dice Roll ─────────
+    # ───────── ROLL DICE ─────────
     elif data.startswith("roll:"):
         room_id = data.split(":")[1]
         room = ROOMS.get(room_id)
@@ -151,23 +175,20 @@ async def callbacks(_: Client, cq: CallbackQuery):
         state = room.state
         player = state.players[state.current_turn]
 
+        # Turn validation
+        if player.user_id != user.id:
+            await cq.answer("Not your turn", show_alert=True)
+            return
+
         dice = engine.roll_dice()
         state.dice_value = dice
 
         await cq.message.reply(
-            f"🎲 Dice rolled: **{dice}**",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        f"Move Token {i+1}",
-                        callback_data=f"move:{room_id}:{i}"
-                    )
-                    for i in range(4)
-                ]
-            ])
+            f"🎲 **Dice rolled:** {dice}",
+            reply_markup=move_keyboard(room_id)
         )
 
-    # ───────── Move Token ─────────
+    # ───────── MOVE TOKEN ─────────
     elif data.startswith("move:"):
         _, room_id, idx = data.split(":")
         idx = int(idx)
@@ -179,6 +200,10 @@ async def callbacks(_: Client, cq: CallbackQuery):
         state = room.state
         player = state.players[state.current_turn]
 
+        if player.user_id != user.id:
+            await cq.answer("Not your turn", show_alert=True)
+            return
+
         result = engine.move_token(
             player,
             idx,
@@ -186,8 +211,12 @@ async def callbacks(_: Client, cq: CallbackQuery):
             state.players
         )
 
-        await cq.message.reply(
-            f"♟️ Move result: `{result['result']}`"
+        # Render board
+        image_path = renderer.render(state.players)
+
+        await cq.message.reply_photo(
+            photo=image_path,
+            caption=f"♟️ Move result: **{result['result']}**"
         )
 
         # Turn handling
@@ -196,7 +225,9 @@ async def callbacks(_: Client, cq: CallbackQuery):
 
         await start_turn(room, cq.message)
 
-# ───────────────────────── TURN HANDLER ─────────────────────────
+# ───────────────────────────────────────
+# TURN HANDLER
+# ───────────────────────────────────────
 
 async def start_turn(room: GameRoom, msg: Message):
     state = room.state
@@ -213,19 +244,14 @@ async def start_turn(room: GameRoom, msg: Message):
         return
 
     await msg.reply(
-        f"🎯 <b>Turn:</b> {player.user_id}\nRoll the dice!",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🎲 Roll Dice",
-                    callback_data=f"roll:{room.room_id}"
-                )
-            ]
-        ])
+        f"🎯 **Turn:** `{player.user_id}`\nRoll the dice!",
+        reply_markup=roll_keyboard(room.room_id)
     )
 
-# ───────────────────────── RUN ─────────────────────────
+# ───────────────────────────────────────
+# RUN
+# ───────────────────────────────────────
 
 if __name__ == "__main__":
     app.run()
-  
+        
