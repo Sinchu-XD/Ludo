@@ -5,6 +5,9 @@ from sqlalchemy.orm import Session
 from db.wallet import add_coins
 from db.models import Match, User
 from config import GAME_BONUS_PERCENT
+from utils.logger import setup_logger
+
+log = setup_logger("reward")
 
 
 class RewardServiceError(Exception):
@@ -15,6 +18,8 @@ class RewardService:
     """
     Handles reward distribution after a match ends
     """
+
+    # ───────────────────────── WINNER COUNT ─────────────────────────
 
     @staticmethod
     def calculate_winners(players_count: int) -> int:
@@ -30,6 +35,8 @@ class RewardService:
         else:
             raise RewardServiceError("Invalid player count")
 
+    # ───────────────────────── DISTRIBUTE ─────────────────────────
+
     @staticmethod
     def distribute(
         db: Session,
@@ -41,7 +48,6 @@ class RewardService:
         """
         ranking: list of user_ids ordered by finish position (1st -> last)
         """
-
         total_players = len(player_ids)
         winners_count = RewardService.calculate_winners(total_players)
 
@@ -53,6 +59,12 @@ class RewardService:
 
         reward_per_winner = reward_pool // winners_count
 
+        log.info(
+            f"Reward calculation | room={room_id} "
+            f"players={total_players} winners={winners} "
+            f"pot={total_pot} bonus={bonus}"
+        )
+
         # ───── Distribute coins ─────
         for uid in winners:
             add_coins(
@@ -60,6 +72,10 @@ class RewardService:
                 user_id=uid,
                 amount=reward_per_winner,
                 reason=f"Ludo match win ({room_id})"
+            )
+            log.info(
+                f"Coins added | user={uid} "
+                f"amount={reward_per_winner} room={room_id}"
             )
 
         # ───── Update user stats ─────
@@ -87,10 +103,14 @@ class RewardService:
         db.add(match)
         db.commit()
 
+        log.info(
+            f"Match saved | room={room_id} "
+            f"winners={winners} reward={reward_per_winner}"
+        )
+
         return {
             "winners": winners,
             "reward_per_winner": reward_per_winner,
             "total_pot": total_pot,
             "bonus": bonus,
         }
-      
