@@ -1,4 +1,4 @@
-# features/daily.py (FINAL FIXED VERSION)
+# features/daily.py (FINAL – MODEL COMPATIBLE)
 
 import random
 from datetime import datetime, timedelta
@@ -14,25 +14,19 @@ class DailyBonusError(Exception):
 
 
 def can_claim(user: User) -> bool:
-    if not user.last_daily_bonus:
+    if not user.daily_claim_at:
         return True
-    return datetime.utcnow() - user.last_daily_bonus >= timedelta(hours=24)
+    return datetime.utcnow() - user.daily_claim_at >= timedelta(hours=24)
 
 
 def claim_daily(db: Session, user_id: int) -> int:
-    """
-    Returns bonus amount if claimed successfully
-    Raises DailyBonusError otherwise
-    """
-
     user = db.query(User).filter(User.user_id == user_id).first()
-
     if not user:
         raise DailyBonusError("User not found")
 
     if not can_claim(user):
         remaining = timedelta(hours=24) - (
-            datetime.utcnow() - user.last_daily_bonus
+            datetime.utcnow() - user.daily_claim_at
         )
         hours = int(remaining.total_seconds() // 3600)
         raise DailyBonusError(
@@ -48,7 +42,7 @@ def claim_daily(db: Session, user_id: int) -> int:
         reason="daily_bonus"
     )
 
-    user.last_daily_bonus = datetime.utcnow()
+    user.daily_claim_at = datetime.utcnow()
     db.commit()
 
     return bonus
