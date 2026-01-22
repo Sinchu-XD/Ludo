@@ -1,10 +1,11 @@
-# services/match_service.py
+# services/match_service.py (FIXED)
+
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from engine.engine import LudoEngine
 from engine.room import GameRoom
-from engine.models import Player
 from services.reward_service import RewardService
 from services.room_store import ROOMS
 from utils.logger import setup_logger
@@ -18,11 +19,10 @@ class MatchServiceError(Exception):
 
 class MatchService:
     """
-    Coordinates a match lifecycle:
-    - validate room
+    Coordinates a match lifecycle safely:
     - start match
-    - build ranking
-    - finalize & distribute rewards
+    - build fair ranking
+    - finalize exactly once
     """
 
     def __init__(self, engine: Optional[LudoEngine] = None):
@@ -31,49 +31,48 @@ class MatchService:
     # ───────────────────────── START MATCH ─────────────────────────
 
     def start_match(self, room: GameRoom) -> None:
-        """
-        Start a match if room is valid
-        """
-        if room.started:
-            raise MatchServiceError("Match already started")
+        if room.started or room.finished:
+            raise MatchServiceError("Match already started or finished")
 
         if len(room.players) < 2:
             raise MatchServiceError("Not enough players to start")
 
         room.start_game()
+
         log.info(
             f"Match started | room={room.room_id} "
             f"players={[p.user_id for p in room.players]}"
         )
-
-    # ───────────────────────── FINISH CHECK ─────────────────────────
-
-    @staticmethod
-    def is_match_finished(room: GameRoom) -> bool:
-        """
-        Match is finished when room.finished is set.
-        """
-        return room.finished
 
     # ───────────────────────── BUILD RANKING ─────────────────────────
 
     @staticmethod
     def build_ranking(room: GameRoom) -> List[int]:
         """
-        Build ranking based on:
-        1) finished tokens count (desc)
-        2) active status (active > inactive)
+        Ranking rules:
+        1) Finished players first
+        2) More finished tokens
+        3) Active players > inactive (AFK/left go last)
         """
         scored = []
 
         for p in room.players:
             finished_tokens = sum(1 for t in p.tokens if t.finished)
-            scored.append((p.user_id, finished_tokens, p.active))
+            finished_all = finished_tokens == len(p.tokens)
 
-        # Sort by finished tokens, then active flag
-        scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
+            scored.append((
+                p.user_id,
+                finished_all,        # winner first
+                finished_tokens,
+                p.active              # AFK players go down
+            ))
 
-        ranking = [uid for uid, _, _ in scored]
+        scored.sort(
+            key=lambda x: (x[1], x[2], x[3]),
+            reverse=True
+        )
+
+        ranking = [uid for uid, *_ in scored]
 
         log.info(
             f"Ranking built | room={room.room_id} ranking={ranking}"
@@ -89,46 +88,52 @@ class MatchService:
         room: GameRoom
     ) -> Dict:
         """
-        Finalize match:
-        - compute ranking
-        - distribute rewards
-        - persist match
-        - cleanup room
+        Finalize match EXACTLY ONCE (idempotent)
         """
+        if room.finished:
+            log.warning(
+                f"Finalize skipped (already finished) | room={room.room_id}"
+            )
+            return {}
+
         if not room.started:
             raise MatchServiceError("Match not started")
 
         log.info(f"Finalizing match | room={room.room_id}")
 
-        # Build ranking
-        ranking = self.build_ranking(room)
+        try:
+            ranking = self.build_ranking(room)
+            player_ids = [p.user_id for p in room.players]
 
-        # Player IDs
-        player_ids = [p.user_id for p in room.players]
+            result = RewardService.distribute(
+                db=db,
+                room_id=room.room_id,
+                player_ids=player_ids,
+                ranking=ranking,
+                entry_fee=room.entry_fee
+            )
 
-        # Distribute rewards
-        result = RewardService.distribute(
-            db=db,
-            room_id=room.room_id,
-            player_ids=player_ids,
-            ranking=ranking,
-            entry_fee=room.entry_fee
-        )
+            room.finished = True
+            room.started = False
 
-        log.info(
-            f"Rewards distributed | room={room.room_id} result={result}"
-        )
+            log.info(
+                f"Rewards distributed | room={room.room_id} result={result}"
+            )
 
-        # Mark room finished & cleanup
-        room.finished = True
-        room.started = False
-        ROOMS.pop(room.room_id, None)
+            return {
+                "room_id": room.room_id,
+                "ranking": ranking,
+                **result
+            }
 
-        log.info(f"Room cleaned up | room={room.room_id}")
+        except SQLAlchemyError as e:
+            log.exception(
+                f"DB error during finalize | room={room.room_id}"
+            )
+            raise MatchServiceError("Match finalize failed") from e
 
-        return {
-            "room_id": room.room_id,
-            "ranking": ranking,
-            **result
-        }
-      
+        finally:
+            # Cleanup ALWAYS
+            ROOMS.pop(room.room_id, None)
+            log.info(f"Room cleaned up | room={room.room_id}")
+            
