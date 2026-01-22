@@ -123,7 +123,7 @@ async def on_turn_timeout(room_id, user_id):
 
 # ───────── CALLBACKS ─────────
 
-@app.on_callback_query(filters.private)
+@app.on_callback_query()
 async def cb(_, cq):
     uid = cq.from_user.id
     data = cq.data
