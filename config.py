@@ -34,7 +34,7 @@ if not (0 <= GAME_BONUS_PERCENT <= 100):
 
 # ───────────────────────── DAILY BONUS ─────────────────────────
 
-DAILY_BONUS = int(os.getenv("DAILY_BONUS", "10"))
+DAILY_BONUS_MIN = int(os.getenv("DAILY_BONUS_MIN", "10"))
 DAILY_BONUS_MAX = int(os.getenv("DAILY_BONUS_MAX", "30"))
 
 if DAILY_BONUS_MIN > DAILY_BONUS_MAX:
