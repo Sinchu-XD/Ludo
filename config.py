@@ -22,7 +22,7 @@ BOT_TOKEN = _require("BOT_TOKEN")
 # Example:
 # postgresql+psycopg2://user:password@localhost:5432/ludo_db
 
-DATABASE_URL = _require("DATABASE_URL")
+DB_URL = _require("DATABASE_URL")
 
 # ───────────────────────── GAME ECONOMY ─────────────────────────
 
