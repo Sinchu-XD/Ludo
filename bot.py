@@ -27,14 +27,27 @@ from services.room_store import ROOMS
 from services.match_service import MatchService
 from services.anti_cheat import AntiCheatService
 
+# ───────── Utils ─────────
+from utils.logger import setup_logger
+from utils.validators import (
+    validate_room_id,
+    validate_token_index,
+    ValidationError
+)
+from utils.helpers import format_coins
+
 # ───────── INIT ─────────
 app = Client("ludo_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+log = setup_logger("bot")
 
 engine = LudoEngine()
 ai = LudoAI()
 renderer = BoardRenderer()
 timer = TurnTimer()
 match_service = MatchService(engine)
+
+log.info("Ludo bot initialized")
 
 # ───────────────── UI ─────────────────
 
@@ -71,11 +84,16 @@ async def start(_, msg):
             return
         user.username = msg.from_user.username
     else:
-        user = User(user_id=msg.from_user.id, username=msg.from_user.username)
+        user = User(
+            user_id=msg.from_user.id,
+            username=msg.from_user.username
+        )
         db.add(user)
 
     db.commit()
     db.close()
+
+    log.info(f"User started bot: {msg.from_user.id}")
     await msg.reply("🎲 Welcome to Ludo Bot", reply_markup=main_menu())
 
 # ───────────────── AFK HANDLER ─────────────────
@@ -84,6 +102,8 @@ async def on_turn_timeout(room_id, user_id):
     room = ROOMS.get(room_id)
     if not room or room.finished:
         return
+
+    log.warning(f"AFK timeout | room={room_id} user={user_id}")
 
     db = SessionLocal()
     AntiCheatService.handle_afk(db, room_id, user_id)
@@ -105,6 +125,8 @@ async def cb(_, cq):
         room.add_player(Player(uid, "red"))
         ROOMS[room.room_id] = room
 
+        log.info(f"Room created: {room.room_id} by {uid}")
+
         await cq.message.reply(
             f"🏠 Room `{room.room_id}` created",
             reply_markup=InlineKeyboardMarkup([
@@ -114,23 +136,32 @@ async def cb(_, cq):
 
     # JOIN ROOM
     elif data.startswith("join:"):
-        room = ROOMS.get(data.split(":")[1])
+        try:
+            _, rid = data.split(":")
+            rid = validate_room_id(rid)
+        except ValidationError:
+            await cq.answer("Invalid room", show_alert=True)
+            return
+
+        room = ROOMS.get(rid)
         if not room:
             return
 
         color = ["green", "yellow", "blue"][len(room.players) - 1]
         room.add_player(Player(uid, color))
+        log.info(f"User {uid} joined room {rid}")
 
         if room.is_full():
             match_service.start_match(room)
             await next_turn(room)
 
-    # DAILY
+    # DAILY BONUS
     elif data == "daily":
         db = SessionLocal()
         try:
             bonus = claim_daily(db, uid)
-            await cq.answer(f"+{bonus} coins", show_alert=True)
+            await cq.answer(f"🎁 +{format_coins(bonus)} coins", show_alert=True)
+            log.info(f"Daily bonus claimed by {uid}: {bonus}")
         except DailyBonusError as e:
             await cq.answer(str(e), show_alert=True)
         db.close()
@@ -138,16 +169,24 @@ async def cb(_, cq):
     # LEADERBOARD
     elif data == "leaderboard":
         db = SessionLocal()
-        data = get_leaderboard(db)
+        top = get_leaderboard(db)
         db.close()
+
         text = "🏆 Leaderboard\n\n"
-        for p in data:
+        for p in top:
             text += f"{p['rank']}. {p['username']} — {p['wins']} wins\n"
+
         await cq.message.reply(text)
 
-    # ROLL
+    # ROLL DICE
     elif data.startswith("roll:"):
-        room = ROOMS.get(data.split(":")[1])
+        try:
+            _, rid = data.split(":")
+            rid = validate_room_id(rid)
+        except ValidationError:
+            return
+
+        room = ROOMS.get(rid)
         if not room:
             return
 
@@ -159,12 +198,25 @@ async def cb(_, cq):
         dice = engine.roll_dice()
         state.dice_value = dice
 
-        await timer.reset(room.room_id, uid, on_turn_timeout)
-        await cq.message.reply(f"🎲 Dice: {dice}", reply_markup=move_kb(room.room_id))
+        log.info(f"Dice rolled | room={rid} user={uid} dice={dice}")
 
-    # MOVE
+        await timer.reset(room.room_id, uid, on_turn_timeout)
+        await cq.message.reply(
+            f"🎲 Dice: {dice}",
+            reply_markup=move_kb(room.room_id)
+        )
+
+    # MOVE TOKEN
     elif data.startswith("move:"):
-        _, rid, idx = data.split(":")
+        try:
+            _, rid, idx = data.split(":")
+            rid = validate_room_id(rid)
+            idx = validate_token_index(idx)
+        except ValidationError:
+            await cq.answer("❌ Invalid move", show_alert=True)
+            log.warning(f"Invalid move data: {data}")
+            return
+
         room = ROOMS.get(rid)
         if not room:
             return
@@ -174,21 +226,35 @@ async def cb(_, cq):
         if player.user_id != uid:
             return
 
-        res = engine.move_token(player, int(idx), state.dice_value, state.players)
-        img = renderer.render(state.players)
+        res = engine.move_token(
+            player,
+            idx,
+            state.dice_value,
+            state.players
+        )
 
+        img = renderer.render(state.players)
         await cq.message.reply_photo(img, caption=f"♟ {res['result']}")
 
-        # Dice rules
-        dice_rules = engine.handle_dice_rules(state, state.dice_value)
+        log.info(
+            f"Move | room={rid} user={uid} result={res['result']}"
+        )
 
-        # Match finish
+        dice_rules = engine.handle_dice_rules(
+            state,
+            state.dice_value
+        )
+
+        # MATCH FINISH
         if res["player_finished"]:
             room.end_game()
             await timer.cancel(room.room_id)
+
             db = SessionLocal()
             match_service.finalize_match(db, room)
             db.close()
+
+            log.info(f"Match finished: {rid}")
             await cq.message.reply("🏁 Match Finished!")
             return
 
@@ -204,14 +270,15 @@ async def next_turn(room, same_player=False):
     if not same_player:
         state.next_turn()
 
-    p = state.players[state.current_turn]
-    await timer.start(room.room_id, p.user_id, on_turn_timeout)
+    player = state.players[state.current_turn]
+    await timer.start(room.room_id, player.user_id, on_turn_timeout)
 
     await app.send_message(
-        p.user_id,
-        f"🎯 Your turn!",
+        player.user_id,
+        "🎯 Your turn! Roll the dice.",
         reply_markup=roll_kb(room.room_id)
     )
 
 # ───────────────── RUN ─────────────────
+log.info("Bot starting...")
 app.run()
