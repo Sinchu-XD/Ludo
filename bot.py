@@ -1,44 +1,37 @@
-# bot.py
+# bot.py (FIXED)
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from contextlib import contextmanager
 
 from config import API_ID, API_HASH, BOT_TOKEN
 
-# ───────── Engine / Game ─────────
 from engine.engine import LudoEngine
 from engine.room import GameRoom
 from engine.models import Player
 from engine.ai import LudoAI
 from engine.timer import TurnTimer
 
-# ───────── Renderer ─────────
 from renderer.board import BoardRenderer
 
-# ───────── Database ─────────
 from db.database import SessionLocal
 from db.models import User
+from db.wallet import WalletService
 
-# ───────── Features ─────────
 from features.daily import claim_daily, DailyBonusError
 from features.leaderboard import get_leaderboard
 
-# ───────── Services ─────────
 from services.room_store import ROOMS
 from services.match_service import MatchService
 from services.anti_cheat import AntiCheatService
 
-# ───────── Utils ─────────
 from utils.logger import setup_logger
-from utils.validators import (
-    validate_room_id,
-    validate_token_index,
-    ValidationError
-)
+from utils.validators import validate_room_id, validate_token_index, ValidationError
 from utils.helpers import format_coins
 
 # ───────── INIT ─────────
-app = Client("ludo_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+app = Client("ludo_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 log = setup_logger("bot")
 
 engine = LudoEngine()
@@ -47,15 +40,27 @@ renderer = BoardRenderer()
 timer = TurnTimer()
 match_service = MatchService(engine)
 
-log.info("Ludo bot initialized")
+# ───────── DB HELPER ─────────
 
-# ───────────────── UI ─────────────────
+@contextmanager
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+# ───────── UI ─────────
 
 def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎲 Create Room", callback_data="create_room")],
         [InlineKeyboardButton("🎁 Daily Bonus", callback_data="daily")],
-        [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
     ])
 
 def roll_kb(room_id):
@@ -69,63 +74,39 @@ def move_kb(room_id):
         for i in range(4)
     ]])
 
-# ───────────────── START ─────────────────
+# ───────── START ─────────
 
-@app.on_message(filters.command("start"))
+@app.on_message(filters.command("start") & filters.private)
 async def start(_, msg):
-    db = SessionLocal()
-    user = db.query(User).filter(User.user_id == msg.from_user.id).first()
+    with get_db() as db:
+        user = db.query(User).filter_by(user_id=msg.from_user.id).first()
 
-    if user:
-        AntiCheatService.check_auto_unban(db, user)
-        if user.is_banned:
-            db.close()
-            await msg.reply("🚫 You are banned.")
-            return
-        user.username = msg.from_user.username
-    else:
-        user = User(
-            user_id=msg.from_user.id,
-            username=msg.from_user.username
-        )
-        db.add(user)
+        if user:
+            AntiCheatService.check_auto_unban(db, user)
+            if user.is_banned:
+                await msg.reply("🚫 You are banned.")
+                return
+            user.username = msg.from_user.username
+        else:
+            db.add(User(
+                user_id=msg.from_user.id,
+                username=msg.from_user.username
+            ))
 
-    db.commit()
-    db.close()
-
-    log.info(f"User started bot: {msg.from_user.id}")
     await msg.reply("🎲 Welcome to Ludo Bot", reply_markup=main_menu())
 
-# ───────────────── AFK HANDLER ─────────────────
+# ───────── CALLBACKS ─────────
 
-async def on_turn_timeout(room_id, user_id):
-    room = ROOMS.get(room_id)
-    if not room or room.finished:
-        return
-
-    log.warning(f"AFK timeout | room={room_id} user={user_id}")
-
-    db = SessionLocal()
-    AntiCheatService.handle_afk(db, room_id, user_id)
-    db.close()
-
-    room.state.next_turn()
-    await next_turn(room)
-
-# ───────────────── CALLBACKS ─────────────────
-
-@app.on_callback_query()
+@app.on_callback_query(filters.private)
 async def cb(_, cq):
-    data = cq.data
     uid = cq.from_user.id
+    data = cq.data
 
     # CREATE ROOM
     if data == "create_room":
         room = GameRoom(uid, entry_fee=50, max_players=2)
         room.add_player(Player(uid, "red"))
         ROOMS[room.room_id] = room
-
-        log.info(f"Room created: {room.room_id} by {uid}")
 
         await cq.message.reply(
             f"🏠 Room `{room.room_id}` created",
@@ -136,41 +117,36 @@ async def cb(_, cq):
 
     # JOIN ROOM
     elif data.startswith("join:"):
-        try:
-            _, rid = data.split(":")
-            rid = validate_room_id(rid)
-        except ValidationError:
-            await cq.answer("Invalid room", show_alert=True)
-            return
+        _, rid = data.split(":")
+        rid = validate_room_id(rid)
 
         room = ROOMS.get(rid)
         if not room:
             return
 
+        with get_db() as db:
+            WalletService.deduct(db, uid, room.entry_fee)
+
         color = ["green", "yellow", "blue"][len(room.players) - 1]
         room.add_player(Player(uid, color))
-        log.info(f"User {uid} joined room {rid}")
 
         if room.is_full():
             match_service.start_match(room)
             await next_turn(room)
 
-    # DAILY BONUS
+    # DAILY
     elif data == "daily":
-        db = SessionLocal()
-        try:
-            bonus = claim_daily(db, uid)
-            await cq.answer(f"🎁 +{format_coins(bonus)} coins", show_alert=True)
-            log.info(f"Daily bonus claimed by {uid}: {bonus}")
-        except DailyBonusError as e:
-            await cq.answer(str(e), show_alert=True)
-        db.close()
+        with get_db() as db:
+            try:
+                bonus = claim_daily(db, uid)
+                await cq.answer(f"🎁 +{format_coins(bonus)}", show_alert=True)
+            except DailyBonusError as e:
+                await cq.answer(str(e), show_alert=True)
 
     # LEADERBOARD
     elif data == "leaderboard":
-        db = SessionLocal()
-        top = get_leaderboard(db)
-        db.close()
+        with get_db() as db:
+            top = get_leaderboard(db)
 
         text = "🏆 Leaderboard\n\n"
         for p in top:
@@ -178,99 +154,66 @@ async def cb(_, cq):
 
         await cq.message.reply(text)
 
-    # ROLL DICE
+    # ROLL
     elif data.startswith("roll:"):
-        try:
-            _, rid = data.split(":")
-            rid = validate_room_id(rid)
-        except ValidationError:
-            return
+        _, rid = data.split(":")
+        rid = validate_room_id(rid)
 
         room = ROOMS.get(rid)
-        if not room:
-            return
-
         state = room.state
         player = state.players[state.current_turn]
+
         if player.user_id != uid:
             return
 
-        dice = engine.roll_dice()
-        state.dice_value = dice
-
-        log.info(f"Dice rolled | room={rid} user={uid} dice={dice}")
-
+        state.dice_value = engine.roll_dice()
         await timer.reset(room.room_id, uid, on_turn_timeout)
         await cq.message.reply(
-            f"🎲 Dice: {dice}",
+            f"🎲 Dice: {state.dice_value}",
             reply_markup=move_kb(room.room_id)
         )
 
-    # MOVE TOKEN
+    # MOVE
     elif data.startswith("move:"):
-        try:
-            _, rid, idx = data.split(":")
-            rid = validate_room_id(rid)
-            idx = validate_token_index(idx)
-        except ValidationError:
-            await cq.answer("❌ Invalid move", show_alert=True)
-            log.warning(f"Invalid move data: {data}")
-            return
+        _, rid, idx = data.split(":")
+        rid = validate_room_id(rid)
+        idx = validate_token_index(idx)
 
         room = ROOMS.get(rid)
-        if not room:
-            return
-
         state = room.state
         player = state.players[state.current_turn]
+
         if player.user_id != uid:
             return
 
-        res = engine.move_token(
-            player,
-            idx,
-            state.dice_value,
-            state.players
+        res = engine.move_token(player, idx, state.dice_value, state.players)
+        await cq.message.reply_photo(
+            renderer.render(state.players),
+            caption=f"♟ {res['result']}"
         )
 
-        img = renderer.render(state.players)
-        await cq.message.reply_photo(img, caption=f"♟ {res['result']}")
-
-        log.info(
-            f"Move | room={rid} user={uid} result={res['result']}"
-        )
-
-        dice_rules = engine.handle_dice_rules(
-            state,
-            state.dice_value
-        )
-
-        # MATCH FINISH
         if res["player_finished"]:
             room.end_game()
             await timer.cancel(room.room_id)
 
-            db = SessionLocal()
-            match_service.finalize_match(db, room)
-            db.close()
+            with get_db() as db:
+                match_service.finalize_match(db, room)
 
-            log.info(f"Match finished: {rid}")
             await cq.message.reply("🏁 Match Finished!")
             return
 
-        if not dice_rules["extra_turn"]:
+        if not engine.handle_dice_rules(state, state.dice_value)["extra_turn"]:
             await next_turn(room)
         else:
             await next_turn(room, same_player=True)
 
-# ───────────────── TURN ─────────────────
+# ───────── TURN ─────────
 
 async def next_turn(room, same_player=False):
-    state = room.state
     if not same_player:
-        state.next_turn()
+        room.state.next_turn()
 
-    player = state.players[state.current_turn]
+    player = room.state.players[room.state.current_turn]
     await timer.start(room.room_id, player.user_id, on_turn_timeout)
 
     await app.send_message(
@@ -279,6 +222,7 @@ async def next_turn(room, same_player=False):
         reply_markup=roll_kb(room.room_id)
     )
 
-# ───────────────── RUN ─────────────────
+# ───────── RUN ─────────
+
 log.info("Bot starting...")
 app.run()
