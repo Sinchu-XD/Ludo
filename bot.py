@@ -72,6 +72,7 @@ def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎲 Create Room", callback_data="create_room")],
         [InlineKeyboardButton("🎁 Daily Bonus", callback_data="daily")],
+        [InlineKeyboardButton("💰 Balance", callback_data="balance")],
         [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
     ])
 
@@ -182,6 +183,16 @@ async def cb(_, cq):
                 await cq.answer(f"🎁 +{format_coins(bonus)} coins", show_alert=True)
             except DailyBonusError as e:
                 await cq.answer(str(e), show_alert=True)
+
+    elif data == "balance":
+        with get_db() as db:
+            bal = get_balance(db, uid)
+
+        await cq.answer(
+            f"💰 Your Balance: {format_coins(bal)} coins",
+            show_alert=True
+    )
+    
 
     # LEADERBOARD
     elif data == "leaderboard":
