@@ -1,10 +1,12 @@
-# features/daily.py
+# features/daily.py (FINAL FIXED VERSION)
+
+import random
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
+from config import DAILY_BONUS_MIN, DAILY_BONUS_MAX
 from db.models import User
 from db.wallet import add_coins
-from config import DAILY_BONUS
 
 
 class DailyBonusError(Exception):
@@ -12,9 +14,9 @@ class DailyBonusError(Exception):
 
 
 def can_claim(user: User) -> bool:
-    if not user.daily_claim_at:
+    if not user.last_daily_bonus:
         return True
-    return datetime.utcnow() - user.daily_claim_at >= timedelta(hours=24)
+    return datetime.utcnow() - user.last_daily_bonus >= timedelta(hours=24)
 
 
 def claim_daily(db: Session, user_id: int) -> int:
@@ -22,30 +24,31 @@ def claim_daily(db: Session, user_id: int) -> int:
     Returns bonus amount if claimed successfully
     Raises DailyBonusError otherwise
     """
+
     user = db.query(User).filter(User.user_id == user_id).first()
 
     if not user:
-        user = User(user_id=user_id, coins=0)
-        db.add(user)
-        db.flush()
+        raise DailyBonusError("User not found")
 
     if not can_claim(user):
-        remaining = timedelta(hours=24) - (datetime.utcnow() - user.daily_claim_at)
+        remaining = timedelta(hours=24) - (
+            datetime.utcnow() - user.last_daily_bonus
+        )
+        hours = int(remaining.total_seconds() // 3600)
         raise DailyBonusError(
-            f"Daily bonus already claimed. Try again in {remaining}."
+            f"⏳ Daily bonus already claimed. Try again in {hours}h"
         )
 
-    # Update claim time
-    user.daily_claim_at = datetime.utcnow()
+    bonus = random.randint(DAILY_BONUS_MIN, DAILY_BONUS_MAX)
 
-    # Add coins
     add_coins(
         db,
         user_id=user_id,
-        amount=DAILY_BONUS,
-        reason="Daily Bonus"
+        amount=bonus,
+        reason="daily_bonus"
     )
 
+    user.last_daily_bonus = datetime.utcnow()
     db.commit()
-    return DAILY_BONUS
-  
+
+    return bonus
