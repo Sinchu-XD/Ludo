@@ -1,6 +1,8 @@
-# services/reward_service.py
-from typing import List
+# services/reward_service.py (FIXED & HARDENED)
+
+from typing import List, Dict
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from db.wallet import add_coins
 from db.models import Match, User
@@ -16,24 +18,21 @@ class RewardServiceError(Exception):
 
 class RewardService:
     """
-    Handles reward distribution after a match ends
+    Handles reward distribution.
+    MUST be called inside a DB transaction.
     """
 
     # ───────────────────────── WINNER COUNT ─────────────────────────
 
     @staticmethod
     def calculate_winners(players_count: int) -> int:
-        """
-        Decide how many winners based on players
-        """
         if players_count == 2:
             return 1
-        elif players_count == 3:
+        if players_count == 3:
             return 2
-        elif players_count == 4:
+        if players_count == 4:
             return 3
-        else:
-            raise RewardServiceError("Invalid player count")
+        raise RewardServiceError("Invalid player count")
 
     # ───────────────────────── DISTRIBUTE ─────────────────────────
 
@@ -44,10 +43,39 @@ class RewardService:
         player_ids: List[int],
         ranking: List[int],
         entry_fee: int
-    ):
+    ) -> Dict:
         """
-        ranking: list of user_ids ordered by finish position (1st -> last)
+        Atomic reward distribution.
+        NO commit here — caller controls transaction.
         """
+
+        # ───── Validation ─────
+        if not player_ids or not ranking:
+            raise RewardServiceError("Invalid match data")
+
+        if entry_fee <= 0:
+            raise RewardServiceError("Invalid entry fee")
+
+        if GAME_BONUS_PERCENT < 0 or GAME_BONUS_PERCENT > 100:
+            raise RewardServiceError("Invalid bonus percent")
+
+        # ───── Idempotency check ─────
+        existing = (
+            db.query(Match)
+            .filter(Match.room_id == room_id)
+            .first()
+        )
+        if existing:
+            log.warning(
+                f"Reward already distributed | room={room_id}"
+            )
+            return {
+                "winners": existing.winners,
+                "reward_per_winner": 0,
+                "total_pot": existing.total_pot,
+                "bonus": existing.bonus,
+            }
+
         total_players = len(player_ids)
         winners_count = RewardService.calculate_winners(total_players)
 
@@ -56,61 +84,72 @@ class RewardService:
         total_pot = entry_fee * total_players
         bonus = int(total_pot * GAME_BONUS_PERCENT / 100)
         reward_pool = total_pot + bonus
-
         reward_per_winner = reward_pool // winners_count
 
         log.info(
-            f"Reward calculation | room={room_id} "
+            f"Reward calc | room={room_id} "
             f"players={total_players} winners={winners} "
             f"pot={total_pot} bonus={bonus}"
         )
 
-        # ───── Distribute coins ─────
-        for uid in winners:
-            add_coins(
-                db,
-                user_id=uid,
-                amount=reward_per_winner,
-                reason=f"Ludo match win ({room_id})"
+        try:
+            # ───── Add coins ─────
+            for uid in winners:
+                add_coins(
+                    db,
+                    user_id=uid,
+                    amount=reward_per_winner,
+                    reason=f"Ludo match win ({room_id})"
+                )
+
+            # ───── Update stats ─────
+            users = (
+                db.query(User)
+                .filter(User.user_id.in_(player_ids))
+                .with_for_update()
+                .all()
             )
+
+            found_ids = {u.user_id for u in users}
+            missing = set(player_ids) - found_ids
+            if missing:
+                raise RewardServiceError(
+                    f"Users not found: {missing}"
+                )
+
+            for user in users:
+                user.total_games += 1
+                if user.user_id in winners:
+                    user.wins += 1
+                else:
+                    user.losses += 1
+
+            # ───── Save match ─────
+            match = Match(
+                room_id=room_id,
+                players=player_ids,
+                winners=winners,
+                entry_fee=entry_fee,
+                total_pot=total_pot,
+                bonus=bonus,
+            )
+            db.add(match)
+
             log.info(
-                f"Coins added | user={uid} "
-                f"amount={reward_per_winner} room={room_id}"
+                f"Reward distributed | room={room_id} "
+                f"reward={reward_per_winner}"
             )
 
-        # ───── Update user stats ─────
-        for uid in player_ids:
-            user = db.query(User).filter(User.user_id == uid).first()
-            if not user:
-                continue
+            return {
+                "winners": winners,
+                "reward_per_winner": reward_per_winner,
+                "total_pot": total_pot,
+                "bonus": bonus,
+            }
 
-            user.total_games += 1
-            if uid in winners:
-                user.wins += 1
-            else:
-                user.losses += 1
-
-        # ───── Save match record ─────
-        match = Match(
-            room_id=room_id,
-            players=player_ids,
-            winners=winners,
-            entry_fee=entry_fee,
-            total_pot=total_pot,
-            bonus=bonus,
-        )
-
-        db.add(match)
-        db.commit()
-
-        log.info(
-            f"Match saved | room={room_id} "
-            f"winners={winners} reward={reward_per_winner}"
-        )
-
-        return {
-            "winners": winners,
-            "reward_per_winner": reward_per_winner,
-            "total_pot": total_pot,
-            "bonus": bonus,
-        }
+        except SQLAlchemyError as e:
+            log.exception(
+                f"Reward distribution failed | room={room_id}"
+            )
+            raise RewardServiceError("Reward distribution failed") from e
+            
