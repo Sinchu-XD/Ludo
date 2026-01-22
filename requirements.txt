@@ -1,9 +1,26 @@
-pyrofork
-tgcrypto
-pillow
-fastapi
-uvicorn
-sqlalchemy
-psycopg2-binary
-redis
-python-dotenv
+# ───────────────────────── Telegram ─────────────────────────
+pyrogram==2.0.106
+tgcrypto==1.2.5
+
+# ───────────────────────── Database ─────────────────────────
+SQLAlchemy==2.0.23
+psycopg2-binary==2.9.9
+
+# ───────────────────────── Admin Panel ─────────────────────────
+fastapi==0.110.0
+uvicorn==0.27.1
+python-jose==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ───────────────────────── Images / Rendering ─────────────────────────
+Pillow==10.2.0
+
+# ───────────────────────── Utilities ─────────────────────────
+python-dotenv==1.0.1
+orjson==3.9.15
+
+# ───────────────────────── Async / HTTP (optional but useful) ─────────────────────────
+httpx==0.26.0
+
+# ───────────────────────── Logging / Time ─────────────────────────
+pytz==2024.1
