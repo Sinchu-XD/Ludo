@@ -1,0 +1,37 @@
+[Unit]
+Description=Telegram Ludo Bot
+After=network.target
+
+[Service]
+Type=simple
+
+# ───── USER & WORKDIR ─────
+User=root
+WorkingDirectory=/opt/ludo_bot
+
+# ───── PYTHON ─────
+ExecStart=/usr/bin/python3 bot.py
+
+# ───── ENV (optional, recommended) ─────
+Environment=ENV=production
+# Example:
+# Environment=BOT_TOKEN=xxxx
+# Environment=API_ID=123456
+# Environment=API_HASH=xxxx
+# Environment=DB_URL=postgresql+psycopg2://user:pass@localhost:5432/ludo_bot
+
+# ───── RESTART POLICY ─────
+Restart=always
+RestartSec=5
+
+# ───── LOGGING ─────
+StandardOutput=append:/opt/ludo_bot/logs/systemd.log
+StandardError=append:/opt/ludo_bot/logs/systemd_error.log
+
+# ───── SECURITY (basic hardening) ─────
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
