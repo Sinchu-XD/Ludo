@@ -1,7 +1,7 @@
-# features/daily.py (FINAL – MODEL COMPATIBLE)
+# features/daily.py (FINAL – TIMEZONE SAFE)
 
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from config import DAILY_BONUS_MIN, DAILY_BONUS_MAX
@@ -16,7 +16,9 @@ class DailyBonusError(Exception):
 def can_claim(user: User) -> bool:
     if not user.daily_claim_at:
         return True
-    return datetime.utcnow() - user.daily_claim_at >= timedelta(hours=24)
+
+    now = datetime.now(timezone.utc)
+    return now - user.daily_claim_at >= timedelta(hours=24)
 
 
 def claim_daily(db: Session, user_id: int) -> int:
@@ -25,9 +27,8 @@ def claim_daily(db: Session, user_id: int) -> int:
         raise DailyBonusError("User not found")
 
     if not can_claim(user):
-        remaining = timedelta(hours=24) - (
-            datetime.utcnow() - user.daily_claim_at
-        )
+        now = datetime.now(timezone.utc)
+        remaining = timedelta(hours=24) - (now - user.daily_claim_at)
         hours = int(remaining.total_seconds() // 3600)
         raise DailyBonusError(
             f"⏳ Daily bonus already claimed. Try again in {hours}h"
@@ -42,7 +43,8 @@ def claim_daily(db: Session, user_id: int) -> int:
         reason="daily_bonus"
     )
 
-    user.daily_claim_at = datetime.utcnow()
+    user.daily_claim_at = datetime.now(timezone.utc)
     db.commit()
 
     return bonus
+    
