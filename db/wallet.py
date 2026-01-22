@@ -1,4 +1,5 @@
-# db/wallet.py
+# db/wallet.py (FIXED & HARDENED)
+
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -12,10 +13,17 @@ class WalletError(Exception):
     pass
 
 
+# ───────────────────────── HELPERS ─────────────────────────
+
+def _validate_amount(amount: int):
+    if not isinstance(amount, int) or amount <= 0:
+        raise WalletError("Invalid amount")
+
+
 # ───────────────────────── BALANCE ─────────────────────────
 
 def get_balance(db: Session, user_id: int) -> int:
-    user = db.query(User).filter(User.user_id == user_id).first()
+    user = db.query(User).filter_by(user_id=user_id).first()
     if not user:
         raise WalletError("User not found")
     return user.coins
@@ -27,13 +35,18 @@ def add_coins(
     db: Session,
     user_id: int,
     amount: int,
-    reason: str = ""
-):
-    if amount <= 0:
-        return
+    reason: str
+) -> int:
+    """
+    Adds coins atomically.
+    COMMIT MUST BE HANDLED BY CALLER.
+    """
+    _validate_amount(amount)
+
+    if not reason:
+        raise WalletError("Reason required")
 
     try:
-        # Row-level lock to avoid race conditions
         user = (
             db.query(User)
             .filter(User.user_id == user_id)
@@ -42,12 +55,7 @@ def add_coins(
         )
 
         if not user:
-            user = User(
-                user_id=user_id,
-                coins=0,
-            )
-            db.add(user)
-            db.flush()
+            raise WalletError("User not found")
 
         user.coins += amount
 
@@ -58,20 +66,21 @@ def add_coins(
         )
         db.add(tx)
 
-        db.commit()
-
         log.info(
             f"Coins added | user={user_id} amount={amount} "
             f"balance={user.coins} reason={reason}"
         )
 
+        return user.coins
+
+    except WalletError:
+        raise
+
     except SQLAlchemyError as e:
-        db.rollback()
-        log.error(
-            f"Add coins failed | user={user_id} amount={amount}",
-            exc_info=True
+        log.exception(
+            f"Add coins failed | user={user_id} amount={amount}"
         )
-        raise WalletError(str(e))
+        raise WalletError("Add coins failed") from e
 
 
 # ───────────────────────── DEDUCT COINS ─────────────────────────
@@ -80,10 +89,16 @@ def deduct_coins(
     db: Session,
     user_id: int,
     amount: int,
-    reason: str = ""
-):
-    if amount <= 0:
-        return
+    reason: str
+) -> int:
+    """
+    Deduct coins atomically.
+    COMMIT MUST BE HANDLED BY CALLER.
+    """
+    _validate_amount(amount)
+
+    if not reason:
+        raise WalletError("Reason required")
 
     try:
         user = (
@@ -108,21 +123,19 @@ def deduct_coins(
         )
         db.add(tx)
 
-        db.commit()
-
         log.info(
             f"Coins deducted | user={user_id} amount={amount} "
             f"balance={user.coins} reason={reason}"
         )
 
+        return user.coins
+
     except WalletError:
-        db.rollback()
         raise
 
     except SQLAlchemyError as e:
-        db.rollback()
-        log.error(
-            f"Deduct coins failed | user={user_id} amount={amount}",
-            exc_info=True
+        log.exception(
+            f"Deduct coins failed | user={user_id} amount={amount}"
         )
-        raise WalletError(str(e))
+        raise WalletError("Deduct coins failed") from e
+        
