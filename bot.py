@@ -16,7 +16,8 @@ from renderer.board import BoardRenderer
 
 from db.database import SessionLocal
 from db.models import User
-from db.wallet import WalletService
+from db.wallet import deduct_coins, add_coins, get_balance
+
 
 from features.daily import claim_daily, DailyBonusError
 from features.leaderboard import get_leaderboard
